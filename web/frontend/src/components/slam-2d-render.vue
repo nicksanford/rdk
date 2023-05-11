@@ -7,8 +7,6 @@ import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls';
 import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader';
 import type { commonApi } from '@viamrobotics/sdk';
-import DestMarker from '../lib/destination-marker.txt?raw';
-import BaseMarker from '../lib/base-marker.txt?raw';
 
 let pointsMaterial: THREE.PointsMaterial | undefined;
 
@@ -16,7 +14,6 @@ const backgroundGridColor = 0xCA_CA_CA;
 
 const gridSubparts = ['AxesPos', 'AxesNeg', 'Grid'];
 
-const svgMarkerRenderOrder = 4;
 const pointsRenderOrder = 3;
 const axesHelperRenderOrder = 2;
 const gridHelperRenderOrder = 1;
@@ -27,20 +24,6 @@ const initialPointSize = 4;
 
 const gridHelperScalar = 4;
 const axesHelperSize = 8;
-
-const textureLoader = new THREE.TextureLoader();
-
-const makeMarker = (png: string, name: string) => {
-  const geometry = new THREE.PlaneGeometry();
-  const material = new THREE.MeshBasicMaterial({ map: textureLoader.load(png), transparent: true });
-  const marker = new THREE.Mesh(geometry, material);
-  marker.name = name;
-  marker.renderOrder = svgMarkerRenderOrder;
-  return marker;
-};
-
-const baseMarkerOffset = new THREE.Vector3(-0.05, -0.3, 0);
-const destinationMarkerOffset = new THREE.Vector3(0, 0.5, 0);
 
 /*
  * this color map is greyscale. The color map is being used map probability values of a PCD
@@ -72,9 +55,7 @@ const props = defineProps<{
   pointCloudUpdateCount: number
   resources: commonApi.ResourceName.AsObject[]
   pointcloud?: Uint8Array
-  pose?: commonApi.Pose
   destExists: boolean
-  destVector: THREE.Vector3
   axesVisible: boolean
 }
 >();
@@ -103,10 +84,6 @@ camera.far = 1000;
 camera.userData.size = 1;
 setCamera(camera);
 scene.add(camera);
-
-const baseMarker = makeMarker(BaseMarker, 'BaseMarker');
-const destMarker = makeMarker(DestMarker, 'DestinationMarker');
-destMarker.visible = false;
 
 const controls = new MapControls(camera, canvas);
 controls.enableRotate = false;
@@ -137,13 +114,6 @@ const disposeScene = () => {
   });
 
   scene.clear();
-};
-
-const updatePose = (newPose: commonApi.Pose) => {
-  const x = newPose.getX();
-  const y = newPose.getY();
-  const z = newPose.getZ();
-  baseMarker.position.set(x, y, z).add(baseMarkerOffset);
 };
 
 /*
@@ -196,17 +166,6 @@ const createGridHelper = (boundingBox: THREE.Box3): THREE.GridHelper => {
   gridHelper.visible = props.axesVisible;
   gridHelper.rotateX(Math.PI / 2);
   return gridHelper;
-};
-
-const updateOrRemoveDestinationMarker = () => {
-  if (props.destVector && props.destExists) {
-    destMarker.visible = true;
-    destMarker.position.copy(props.destVector).add(destinationMarkerOffset);
-  }
-
-  if (!props.destExists) {
-    destMarker.visible = false;
-  }
 };
 
 const updatePointCloud = (pointcloud: Uint8Array) => {
@@ -275,12 +234,9 @@ const updatePointCloud = (pointcloud: Uint8Array) => {
     points,
     intersectionPlane,
     axesPos,
-    axesNeg,
-    baseMarker,
-    destMarker
+    axesNeg
   );
 
-  updateOrRemoveDestinationMarker();
 };
 
 let removeUpdate: (() => void) | undefined;
@@ -301,10 +257,6 @@ onMounted(() => {
     updatePointCloud(props.pointcloud);
   }
 
-  if (props.pose !== undefined) {
-    updatePose(props.pose);
-  }
-
 });
 
 onUnmounted(() => {
@@ -313,23 +265,11 @@ onUnmounted(() => {
   removeUpdate?.();
 });
 
-watch(() => [props.destVector!.x, props.destVector!.y, props.destExists], updateOrRemoveDestinationMarker);
-
 watch(() => props.axesVisible, () => {
   for (const gridPart of gridSubparts) {
     const part = scene.getObjectByName(gridPart);
     if (part !== undefined) {
       part.visible = props.axesVisible;
-    }
-  }
-});
-
-watch(() => props.pose, (newPose) => {
-  if (newPose !== undefined) {
-    try {
-      updatePose(newPose);
-    } catch (error) {
-      console.error('failed to update pose', error);
     }
   }
 });

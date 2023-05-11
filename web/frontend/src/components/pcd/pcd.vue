@@ -4,22 +4,25 @@ import {
   Client,
   commonApi,
 } from '@viamrobotics/sdk';
+import { $ref } from 'vue/macros';
 import { toast } from '../../lib/toast';
-import PCD from './pcd-view.vue';
+// import PCD from './pcd-view.vue';
+import Slam2dRender from '../slam-2d-render.vue';
 
 const props = defineProps<{
   cameraName: string;
-  showRefresh: boolean;
   resources: commonApi.ResourceName.AsObject[];
   client: Client;
 }>();
 
 let pcdExpanded = $ref(false);
 let pointcloud = $ref<Uint8Array | undefined>();
+let pointCloudUpdateCount = $ref(0);
 
 const renderPCD = async () => {
   try {
     pointcloud = await new CameraClient(props.client, props.cameraName).getPointCloud();
+    pointCloudUpdateCount += 1;
   } catch (error) {
     toast.error(`Error getting point cloud: ${error}`);
   }
@@ -52,12 +55,21 @@ const togglePCDExpand = () => {
       </v-tooltip>
     </div>
 
-    <PCD
+    <!-- <PCD
       v-if="pcdExpanded"
       :resources="resources"
       :pointcloud="pointcloud"
       :camera-name="cameraName"
       :client="client"
-    />
+    /> -->
   </div>
+  <Slam2dRender
+    :point-cloud-update-count="pointCloudUpdateCount"
+    :pointcloud="pointcloud"
+    :name="cameraName"
+    :resources="resources"
+    :dest-exists="false"
+    :axes-visible="true"
+    @click="(_) => {}"
+  />
 </template>
