@@ -333,6 +333,7 @@ func (g *rtkSerial) getStream(mountPoint string, maxAttempts int) error {
 
 // openPort opens the serial port for writing.
 func (g *rtkSerial) openPort() error {
+	g.logger.Debug("openPort called")
 	options := slib.OpenOptions{
 		PortName:        g.writePath,
 		BaudRate:        uint(g.wbaud),
@@ -342,6 +343,10 @@ func (g *rtkSerial) openPort() error {
 	}
 
 	g.ntripMu.Lock()
+	g.logger.Debug("openPort locked")
+	defer func() {
+		g.logger.Debug("openPort unlocked")
+	}()
 	defer g.ntripMu.Unlock()
 
 	if err := g.cancelCtx.Err(); err != nil {
@@ -349,42 +354,56 @@ func (g *rtkSerial) openPort() error {
 	}
 
 	var err error
+	g.logger.Debug("calling slib.Open")
 	g.correctionWriter, err = slib.Open(options)
 	if err != nil {
 		g.logger.Errorf("serial.Open: %v", err)
 		return err
 	}
+	g.logger.Debug("called slib.Open")
 
 	return nil
 }
 
 // closePort closes the serial port.
 func (g *rtkSerial) closePort() {
+	g.logger.Debug("closePort called")
 	g.ntripMu.Lock()
+	g.logger.Debug("closePort locked")
+	defer func() {
+		g.logger.Debug("closePort unlocked")
+	}()
 	defer g.ntripMu.Unlock()
 
 	if g.correctionWriter != nil {
+		g.logger.Debug("calling g.correctionWriter.Close()")
 		err := g.correctionWriter.Close()
 		if err != nil {
 			g.logger.Errorf("Error closing port: %v", err)
 		}
+		g.logger.Debug("called g.correctionWriter.Close()")
 	}
 }
 
 // receiveAndWriteSerial connects to NTRIP receiver and sends correction stream to the MovementSensor through serial.
 func (g *rtkSerial) receiveAndWriteSerial() {
+	g.logger.Debug("receiveAndWriteSerial called")
 	defer g.activeBackgroundWorkers.Done()
 	if err := g.cancelCtx.Err(); err != nil {
+		g.logger.Errorf("receiveAndWriteSerial cancelled %v", err)
 		return
 	}
+	g.logger.Debug("calling g.connect")
 	err := g.connect(g.ntripClient.URL, g.ntripClient.Username, g.ntripClient.Password, g.ntripClient.MaxConnectAttempts)
 	if err != nil {
+		g.logger.Errorf("g.connect got an error: %#v", err)
 		g.err.Set(err)
 		return
 	}
+	g.logger.Debug("called g.connect")
 
 	if !g.ntripClient.Client.IsCasterAlive() {
-		g.logger.Infof("caster %s seems to be down", g.ntripClient.URL)
+		g.logger.Errorf("caster %s seems to be down", g.ntripClient.URL)
 	}
 
 	err = g.openPort()
@@ -426,11 +445,13 @@ func (g *rtkSerial) receiveAndWriteSerial() {
 
 			if msg == nil {
 				if g.isClosed {
+					g.logger.Error("g.isClosed")
 					return
 				}
 				g.logger.Debug("No message... reconnecting to stream...")
 				err = g.getStream(g.ntripClient.MountPoint, g.ntripClient.MaxConnectAttempts)
 				if err != nil {
+					g.logger.Errorf("getStream got an error %#v", err)
 					g.err.Set(err)
 					return
 				}

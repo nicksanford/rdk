@@ -73,7 +73,7 @@ func NewSerialGPSNMEA(ctx context.Context, name resource.Name, conf *Config, log
 		MinimumReadSize: 4,
 	}
 
-	logger.Debug("serial.Open(options): %#v", options)
+	logger.Debugf("serial.Open(options): %#v", options)
 	dev, err := serial.Open(options)
 	if err != nil {
 		return nil, err
@@ -127,7 +127,7 @@ func (g *SerialNMEAMovementSensor) Start(ctx context.Context) error {
 				g.mu.Lock()
 				g.logger.Debug("about to call g.data.ParseAndUpdate(line)")
 				err = g.data.ParseAndUpdate(line)
-				g.logger.Debug("called g.data.ParseAndUpdate(line) %#v *g")
+				g.logger.Debug("called g.data.ParseAndUpdate(line)")
 				g.mu.Unlock()
 				if err != nil {
 					g.logger.Warnf("can't parse nmea sentence: %#v", err)
