@@ -73,6 +73,7 @@ func NewSerialGPSNMEA(ctx context.Context, name resource.Name, conf *Config, log
 		MinimumReadSize: 4,
 	}
 
+	logger.Debug("serial.Open(options): %#v", options)
 	dev, err := serial.Open(options)
 	if err != nil {
 		return nil, err
@@ -107,6 +108,7 @@ func (g *SerialNMEAMovementSensor) Start(ctx context.Context) error {
 	utils.PanicCapturingGo(func() {
 		defer g.activeBackgroundWorkers.Done()
 		r := bufio.NewReader(g.dev)
+		g.logger.Debug("starting new reader")
 		for {
 			select {
 			case <-g.cancelCtx.Done():
@@ -123,7 +125,9 @@ func (g *SerialNMEAMovementSensor) Start(ctx context.Context) error {
 				}
 				// Update our struct's gps data in-place
 				g.mu.Lock()
+				g.logger.Debug("about to call g.data.ParseAndUpdate(line)")
 				err = g.data.ParseAndUpdate(line)
+				g.logger.Debug("called g.data.ParseAndUpdate(line) %#v *g")
 				g.mu.Unlock()
 				if err != nil {
 					g.logger.Warnf("can't parse nmea sentence: %#v", err)
