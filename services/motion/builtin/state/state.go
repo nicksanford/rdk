@@ -135,34 +135,6 @@ type planWithExecutor struct {
 	motionplan   motionplan.Plan
 }
 
-// func toGeoPosePlanSteps(resp PlanResponse) ([]motion.PlanStep, error) {
-// 	if len(resp.GeoPoses) != len(resp.PosesByComponent) {
-// 		msg := "PlanResp.GeoPoses (len: %d) & PlanResp.PosesByComponent (len: %d) must have the same length"
-// 		return nil, fmt.Errorf(msg, len(resp.GeoPoses), len(resp.PosesByComponent))
-// 	}
-// 	steps := make([]motion.PlanStep, 0, len(resp.PosesByComponent))
-// 	for i, ps := range resp.PosesByComponent {
-// 		if len(ps) == 0 {
-// 			continue
-// 		}
-
-// 		if l := len(ps); l > 1 {
-// 			return nil, fmt.Errorf("only single component or fewer plan steps supported, received plan step with %d componenents", l)
-// 		}
-
-// 		var resourceName resource.Name
-// 		for k := range ps {
-// 			resourceName = k
-// 		}
-// 		geoPose := resp.GeoPoses[i]
-// 		heading := math.Mod(math.Abs(geoPose.Heading()-360), 360)
-// 		o := &spatialmath.OrientationVectorDegrees{OZ: 1, Theta: heading}
-// 		poseContainingGeoPose := spatialmath.NewPose(r3.Vector{X: geoPose.Location().Lat(), Y: geoPose.Location().Lng()}, o)
-// 		steps = append(steps, map[resource.Name]spatialmath.Pose{resourceName: poseContainingGeoPose})
-// 	}
-// 	return steps, nil
-// }
-
 // NewPlan creates a new motion.Plan from an execution & returns an error if one was not able to be created.
 func (e *execution[R]) newPlanWithExecutor(seedPlan motionplan.Plan, replanCount int) (planWithExecutor, error) {
 	pe, err := e.planExecutorConstructor(e.executorCancelCtx, e.req, seedPlan, replanCount)
@@ -173,12 +145,7 @@ func (e *execution[R]) newPlanWithExecutor(seedPlan motionplan.Plan, replanCount
 	if err != nil {
 		return planWithExecutor{}, err
 	}
-	// TODO: TEMP: Currently this is assuming that the Executor is implemented by MoveOnGlobe & that
-	// we are going to embed the GeoPose in a Pose.
-	// steps, err := toGeoPosePlanSteps(resp)
-	if err != nil {
-		return planWithExecutor{}, err
-	}
+
 	plan := motion.Plan{
 		ID:            uuid.New(),
 		ExecutionID:   e.id,

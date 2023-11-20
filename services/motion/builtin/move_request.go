@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
 	goutils "go.viam.com/utils"
 
@@ -108,26 +109,22 @@ func (mr *moveRequest) Plan() (state.PlanResponse, error) {
 			Motionplan: plan,
 		}, nil
 	case requestTypeMoveOnGlobe:
-		poses, geoPoses, err := motionplan.PlanToPlanStepsAndGeoPoses(plan, mr.kinematicBase.Name(), mr.origin, *mr.planRequest)
+		posesByComponent, geoPoses, err := motionplan.PlanToPlanStepsAndGeoPoses(plan, mr.kinematicBase.Name(), mr.origin, *mr.planRequest)
 		if err != nil {
-			return state.PlanResp{}, err
+			return state.PlanResponse{}, err
 		}
-		mr.logger.Errorf("poses: %#v", poses)
+		mr.logger.Errorf("poses: %#v", posesByComponent)
 		mr.logger.Errorf("geoPoses: %#v", geoPoses)
 
-		// This copy is needed as the motionplan package can't return motion.PlanStep as that would cause a circular dependency
-		// and b/c we need to convert []map[resource.Name]spatialmath.Pose into a []motion.PlanStep.
-		// B/c the go compiler appears to not support type converting a slice of maps (despite the fact that the
-		// concrete types are the same) we need to do this copy.
-		planSteps := make([]motion.PlanStep, 0, len(poses))
-		for _, p := range poses {
-			planSteps = append(planSteps, p)
+		// NOTE: Here we are smuggling GeoPoses into Poses by component
+		planSteps, err := toGeoPosePlanSteps(posesByComponent, geoPoses)
+		if err != nil {
+			return state.PlanResponse{}, err
 		}
 
 		return state.PlanResponse{
 			Waypoints:        waypoints,
 			Motionplan:       plan,
-			GeoPoses:         geoPoses,
 			PosesByComponent: planSteps,
 		}, nil
 	case requestTypeUnspecified:
@@ -723,4 +720,32 @@ func (mr *moveRequest) Execute(waypoints state.Waypoints) (state.ExecuteResponse
 func (mr *moveRequest) Cancel() {
 	mr.cancelFn()
 	mr.backgroundWorkers.Wait()
+}
+
+func toGeoPosePlanSteps(posesByComponent []map[resource.Name]spatialmath.Pose, geoPoses []spatialmath.GeoPose) ([]motion.PlanStep, error) {
+	if len(geoPoses) != len(posesByComponent) {
+		msg := "GeoPoses (len: %d) & PosesByComponent (len: %d) must have the same length"
+		return nil, fmt.Errorf(msg, len(geoPoses), len(posesByComponent))
+	}
+	steps := make([]motion.PlanStep, 0, len(posesByComponent))
+	for i, ps := range posesByComponent {
+		if len(ps) == 0 {
+			continue
+		}
+
+		if l := len(ps); l > 1 {
+			return nil, fmt.Errorf("only single component or fewer plan steps supported, received plan step with %d componenents", l)
+		}
+
+		var resourceName resource.Name
+		for k := range ps {
+			resourceName = k
+		}
+		geoPose := geoPoses[i]
+		heading := math.Mod(math.Abs(geoPose.Heading()-360), 360)
+		o := &spatialmath.OrientationVectorDegrees{OZ: 1, Theta: heading}
+		poseContainingGeoPose := spatialmath.NewPose(r3.Vector{X: geoPose.Location().Lat(), Y: geoPose.Location().Lng()}, o)
+		steps = append(steps, map[resource.Name]spatialmath.Pose{resourceName: poseContainingGeoPose})
+	}
+	return steps, nil
 }
