@@ -1873,6 +1873,7 @@ func TestMoveOnGlobeNew(t *testing.T) {
 	test.That(t, ph[0].Plan.ExecutionID.String(), test.ShouldResemble, executionID)
 	test.That(t, len(ph[0].StatusHistory), test.ShouldEqual, 1)
 	test.That(t, ph[0].StatusHistory[0].State, test.ShouldEqual, motion.PlanStateInProgress)
+	test.That(t, len(ph[0].Plan.Steps), test.ShouldNotEqual, 0)
 
 	err = ms.StopPlan(ctx, motion.StopPlanReq{ComponentName: fakeBase.Name()})
 	test.That(t, err, test.ShouldBeNil)
@@ -1884,6 +1885,7 @@ func TestMoveOnGlobeNew(t *testing.T) {
 	test.That(t, len(ph2[0].StatusHistory), test.ShouldEqual, 2)
 	test.That(t, ph2[0].StatusHistory[0].State, test.ShouldEqual, motion.PlanStateStopped)
 	test.That(t, ph2[0].StatusHistory[1].State, test.ShouldEqual, motion.PlanStateInProgress)
+	test.That(t, len(ph2[0].Plan.Steps), test.ShouldNotEqual, 0)
 }
 
 func TestStopPlan(t *testing.T) {

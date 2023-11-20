@@ -247,18 +247,16 @@ func (e *execution[R]) toStateExecution() stateExecution {
 	}
 }
 
-// NOTE: We hold the lock for both updateStateNewExecution & updateStateNewPlan to ensure no readers
-// are able to see a state where the execution exists but does not have a plan with a status.
 func (e *execution[R]) notifyStateNewExecution(execution stateExecution, plan motion.Plan, time time.Time) {
 	e.state.mu.Lock()
 	defer e.state.mu.Unlock()
-
+	// NOTE: We hold the lock for both updateStateNewExecution & updateStateNewPlan to ensure no readers
+	// are able to see a state where the execution exists but does not have a plan with a status.
 	e.state.updateStateNewExecution(execution)
-	msg := newPlanMsg{
+	e.state.updateStateNewPlan(newPlanMsg{
 		plan:       plan,
 		planStatus: motion.PlanStatus{State: motion.PlanStateInProgress, Timestamp: time},
-	}
-	e.state.updateStateNewPlan(msg)
+	})
 }
 
 func (e *execution[R]) notifyStateNewPlan(plan motion.Plan, time time.Time) {

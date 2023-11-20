@@ -13,8 +13,10 @@ import (
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/motionplan"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/services/motion/builtin/state"
+	"go.viam.com/rdk/spatialmath"
 )
 
 var replanReason = "replan triggered due to location drift"
@@ -60,10 +62,14 @@ func TestState(t *testing.T) {
 		seedPlan motionplan.Plan,
 		replanCount int,
 	) (state.PlannerExecutor, error) {
-		return &testPlannerExecutor{executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
-			<-ctx.Done()
-			return state.ExecuteResponse{}, context.Cause(ctx)
-		}}, nil
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		return &testPlannerExecutor{
+			executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
+				<-cancelCtx.Done()
+				return state.ExecuteResponse{}, cancelCtx.Err()
+			},
+			cancelFunc: cancelFn,
+		}, nil
 	}
 
 	successPlanConstructor := func(
@@ -72,12 +78,16 @@ func TestState(t *testing.T) {
 		seedPlan motionplan.Plan,
 		replanCount int,
 	) (state.PlannerExecutor, error) {
-		return &testPlannerExecutor{executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
-			if err := ctx.Err(); err != nil {
-				return state.ExecuteResponse{}, err
-			}
-			return state.ExecuteResponse{}, nil
-		}}, nil
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
+		return &testPlannerExecutor{
+			executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
+				if err := cancelCtx.Err(); err != nil {
+					return state.ExecuteResponse{}, err
+				}
+				return state.ExecuteResponse{}, nil
+			},
+			cancelFunc: cancelFn,
+		}, nil
 	}
 
 	replanPlanConstructor := func(
@@ -86,12 +96,13 @@ func TestState(t *testing.T) {
 		seedPlan motionplan.Plan,
 		replanCount int,
 	) (state.PlannerExecutor, error) {
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
 		return &testPlannerExecutor{executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
-			if err := ctx.Err(); err != nil {
+			if err := cancelCtx.Err(); err != nil {
 				return state.ExecuteResponse{}, err
 			}
 			return state.ExecuteResponse{Replan: true, ReplanReason: replanReason}, nil
-		}}, nil
+		}, cancelFunc: cancelFn}, nil
 	}
 
 	failedExecutionPlanConstructor := func(
@@ -100,12 +111,13 @@ func TestState(t *testing.T) {
 		_ motionplan.Plan,
 		_ int,
 	) (state.PlannerExecutor, error) {
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
 		return &testPlannerExecutor{executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
-			if err := ctx.Err(); err != nil {
+			if err := cancelCtx.Err(); err != nil {
 				return state.ExecuteResponse{}, err
 			}
 			return state.ExecuteResponse{}, errors.New("execution failed")
-		}}, nil
+		}, cancelFunc: cancelFn}, nil
 	}
 
 	//nolint:unparam
@@ -115,6 +127,7 @@ func TestState(t *testing.T) {
 		_ motionplan.Plan,
 		_ int,
 	) (state.PlannerExecutor, error) {
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
 		return &testPlannerExecutor{
 			planFunc: func() (state.PlanResponse, error) {
 				return state.PlanResponse{}, errors.New("planning failed")
@@ -123,11 +136,12 @@ func TestState(t *testing.T) {
 				t.Log("should not be called as planning failed")
 				t.FailNow()
 
-				if err := ctx.Err(); err != nil {
+				if err := cancelCtx.Err(); err != nil {
 					return state.ExecuteResponse{}, err
 				}
 				return state.ExecuteResponse{Replan: true, ReplanReason: replanReason}, nil
 			},
+			cancelFunc: cancelFn,
 		}, nil
 	}
 
@@ -137,6 +151,7 @@ func TestState(t *testing.T) {
 		_ motionplan.Plan,
 		replanCount int,
 	) (state.PlannerExecutor, error) {
+		cancelCtx, cancelFn := context.WithCancel(context.Background())
 		// first replan fails during planning
 		if replanCount == 1 {
 			return &testPlannerExecutor{
@@ -144,11 +159,12 @@ func TestState(t *testing.T) {
 					return state.PlanResponse{}, errors.New("planning failed")
 				},
 				executeFunc: func(wp state.Waypoints) (state.ExecuteResponse, error) {
-					if err := ctx.Err(); err != nil {
+					if err := cancelCtx.Err(); err != nil {
 						return state.ExecuteResponse{}, err
 					}
 					return state.ExecuteResponse{Replan: true, ReplanReason: replanReason}, nil
 				},
+				cancelFunc: cancelFn,
 			}, nil
 		}
 		// first plan generates a plan but execution triggers a replan
@@ -159,6 +175,7 @@ func TestState(t *testing.T) {
 				}
 				return state.ExecuteResponse{Replan: true, ReplanReason: replanReason}, nil
 			},
+			cancelFunc: cancelFn,
 		}, nil
 	}
 
@@ -531,11 +548,14 @@ func TestState(t *testing.T) {
 				planFunc: func() (state.PlanResponse, error) {
 					// first plan succeeds
 					if replanCount == 0 {
-						return state.PlanResponse{}, nil
+						pbc := map[resource.Name]spatialmath.Pose{req.ComponentName: spatialmath.NewZeroPose()}
+						return state.PlanResponse{PosesByComponent: []motion.PlanStep{pbc}}, nil
 					}
 					// first replan succeeds
 					if replanCount == 1 {
-						return state.PlanResponse{}, nil
+						pbc1 := map[resource.Name]spatialmath.Pose{req.ComponentName: spatialmath.NewZeroPose()}
+						pbc2 := map[resource.Name]spatialmath.Pose{req.ComponentName: spatialmath.NewZeroPose()}
+						return state.PlanResponse{PosesByComponent: []motion.PlanStep{pbc1, pbc2}}, nil
 					}
 					// second replan fails
 					return state.PlanResponse{}, replanFailReason
@@ -586,6 +606,8 @@ func TestState(t *testing.T) {
 		test.That(t, *resPWS3.pws[0].StatusHistory[0].Reason, test.ShouldResemble, replanFailReason.Error())
 		test.That(t, resPWS3.pws[0].StatusHistory[1].State, test.ShouldEqual, motion.PlanStateInProgress)
 		test.That(t, resPWS3.pws[0].StatusHistory[1].Reason, test.ShouldBeNil)
+		test.That(t, len(resPWS3.pws[0].Plan.Steps), test.ShouldEqual, 2)
+		test.That(t, len(resPWS3.pws[1].Plan.Steps), test.ShouldEqual, 1)
 		test.That(t, planStatusTimestampsInOrder(resPWS3.pws[0].StatusHistory), test.ShouldBeTrue)
 		test.That(t, planStatusTimestampsInOrder(resPWS3.pws[1].StatusHistory), test.ShouldBeTrue)
 
@@ -700,28 +722,6 @@ func TestState(t *testing.T) {
 		test.That(t, ps8, test.ShouldBeEmpty)
 	})
 }
-
-// func planHistoryStr(pws []motion.PlanWithStatus) string {
-// 	var b bytes.Buffer
-// 	if len(pws) == 0 {
-// 		return ""
-// 	}
-
-// 	b.WriteString(fmt.Sprintf("componentName: %s, executionID: %s", pws[0].Plan.ComponentName, pws[0].Plan.ExecutionID))
-
-// 	for _, p := range pws {
-// 		b.WriteString("\n")
-// 		b.WriteString(fmt.Sprintf("planID: %s\n", p.Plan.ID))
-// 		for _, s := range p.StatusHistory {
-// 			if s.Reason != nil {
-// 				b.WriteString(fmt.Sprintf("state: %s, reason: %s, time: %s\n", s.State, *s.Reason, s.Timestamp))
-// 				continue
-// 			}
-// 			b.WriteString(fmt.Sprintf("state: %s, time: %s\n", s.State, s.Timestamp))
-// 		}
-// 	}
-// 	return b.String()
-// }
 
 func planStatusTimestampsInOrder(ps []motion.PlanStatus) bool {
 	if len(ps) == 0 {
