@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	geo "github.com/kellydunn/golang-geo"
 	"github.com/pkg/errors"
+
 	// registers all components.
 	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/test"
@@ -292,22 +293,22 @@ func TestMoveResponseString(t *testing.T) {
 	testCases := []testCase{
 		{
 			"when executeResponse.Replan is false & ReplanReason is empty and error is not nil",
-			"builtin.moveResponse{executeResponse: state.ExecuteResp{Replan:false, ReplanReason:\"\"}, err: an error}",
+			"builtin.moveResponse{executeResponse: state.ExecuteResponse{Replan:false, ReplanReason:\"\"}, err: an error}",
 			moveResponse{err: errors.New("an error")},
 		},
 		{
 			"when executeResponse.Replan is true & ReplanReason is not empty and error is not nil",
-			"builtin.moveResponse{executeResponse: state.ExecuteResp{Replan:true, ReplanReason:\"some reason\"}, err: an error}",
+			"builtin.moveResponse{executeResponse: state.ExecuteResponse{Replan:true, ReplanReason:\"some reason\"}, err: an error}",
 			moveResponse{executeResponse: state.ExecuteResponse{Replan: true, ReplanReason: "some reason"}, err: errors.New("an error")},
 		},
 		{
 			"when executeResponse.Replan is true & ReplanReason is not empty and error is nil",
-			"builtin.moveResponse{executeResponse: state.ExecuteResp{Replan:true, ReplanReason:\"some reason\"}, err: <nil>}",
+			"builtin.moveResponse{executeResponse: state.ExecuteResponse{Replan:true, ReplanReason:\"some reason\"}, err: <nil>}",
 			moveResponse{executeResponse: state.ExecuteResponse{Replan: true, ReplanReason: "some reason"}},
 		},
 		{
 			"when executeResponse.Replan is false & ReplanReason is empty and error is nil",
-			"builtin.moveResponse{executeResponse: state.ExecuteResp{Replan:false, ReplanReason:\"\"}, err: <nil>}",
+			"builtin.moveResponse{executeResponse: state.ExecuteResponse{Replan:false, ReplanReason:\"\"}, err: <nil>}",
 			moveResponse{},
 		},
 	}
