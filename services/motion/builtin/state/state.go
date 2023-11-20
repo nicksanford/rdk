@@ -24,8 +24,6 @@ var (
 	ErrUnknownResource = errors.New("unknown resource")
 	// ErrNotFound indicates the entity was not found.
 	ErrNotFound = errors.New("not found")
-	// ErrExecutionStopped indicates the execution was stopped.
-	ErrExecutionStopped = errors.New("execution stopped")
 )
 
 // Waypoints represent the waypoints of the plan.
@@ -91,15 +89,15 @@ type stateUpdateMsg struct {
 // execution has exprienced & the waitGroup & cancelFunc
 // required to shut down an execution's goroutine.
 type stateExecution struct {
-	id              motion.ExecutionID
-	componentName   resource.Name
-	waitGroup       *sync.WaitGroup
-	cancelCauseFunc context.CancelCauseFunc
-	history         []motion.PlanWithStatus
+	id            motion.ExecutionID
+	componentName resource.Name
+	waitGroup     *sync.WaitGroup
+	cancelFunc    context.CancelFunc
+	history       []motion.PlanWithStatus
 }
 
 func (e *stateExecution) stop() {
-	e.cancelCauseFunc(ErrExecutionStopped)
+	e.cancelFunc()
 	e.waitGroup.Wait()
 }
 
@@ -114,14 +112,14 @@ func (cs componentState) lastExecutionID() motion.ExecutionID {
 // execution represents the state of a motion planning execution.
 // it only ever exists in state.StartExecution function & the go routine created.
 type execution[R any] struct {
-	id                      motion.ExecutionID
-	state                   *State
-	waitGroup               *sync.WaitGroup
-	cancelCtx               context.Context
-	cancelCauseFunc         context.CancelCauseFunc
-	executorCancelCtx       context.Context
-	executorCancelCauseFunc context.CancelCauseFunc
-	logger                  logging.Logger
+	id                 motion.ExecutionID
+	state              *State
+	waitGroup          *sync.WaitGroup
+	cancelCtx          context.Context
+	cancelFunc         context.CancelFunc
+	executorCancelCtx  context.Context
+	executorCancelFunc context.CancelFunc
+	logger             logging.Logger
 	// TODO: Make this generic across MoveOnGlobe & MoveOnMap
 	componentName           resource.Name
 	req                     R
@@ -200,7 +198,7 @@ func (e *execution[R]) start() error {
 			select {
 			case <-e.cancelCtx.Done():
 				e.notifyStatePlanStopped(lastPWE.plan, time.Now())
-				e.executorCancelCauseFunc(context.Cause(e.cancelCtx))
+				e.executorCancelFunc()
 				return
 			case res := <-resChan:
 				// failure
@@ -242,10 +240,10 @@ func (e *execution[R]) start() error {
 
 func (e *execution[R]) toStateExecution() stateExecution {
 	return stateExecution{
-		id:              e.id,
-		componentName:   e.componentName,
-		waitGroup:       e.waitGroup,
-		cancelCauseFunc: e.cancelCauseFunc,
+		id:            e.id,
+		componentName: e.componentName,
+		waitGroup:     e.waitGroup,
+		cancelFunc:    e.cancelFunc,
 	}
 }
 
@@ -308,10 +306,10 @@ func (e *execution[R]) notifyStatePlanStopped(plan motion.Plan, time time.Time) 
 // State is the state of the builtin motion service
 // It keeps track of the builtin motion service's executions.
 type State struct {
-	waitGroup       *sync.WaitGroup
-	cancelCtx       context.Context
-	cancelCauseFunc context.CancelCauseFunc
-	logger          logging.Logger
+	waitGroup  *sync.WaitGroup
+	cancelCtx  context.Context
+	cancelFunc context.CancelFunc
+	logger     logging.Logger
 	// mu protects the componentStateByComponent
 	mu                        sync.RWMutex
 	componentStateByComponent map[resource.Name]componentState
@@ -319,10 +317,10 @@ type State struct {
 
 // NewState creates a new state.
 func NewState(ctx context.Context, logger logging.Logger) *State {
-	cancelCtx, cancelFunc := context.WithCancelCause(ctx)
+	cancelCtx, cancelFunc := context.WithCancel(ctx)
 	s := State{
 		cancelCtx:                 cancelCtx,
-		cancelCauseFunc:           cancelFunc,
+		cancelFunc:                cancelFunc,
 		waitGroup:                 &sync.WaitGroup{},
 		componentStateByComponent: make(map[resource.Name]componentState),
 		logger:                    logger,
@@ -346,15 +344,15 @@ func StartExecution[R any](
 	}
 
 	// the state being cancelled should cause all executions derived from that state to also be cancelled
-	cancelCtx, cancelCauseFunc := context.WithCancelCause(s.cancelCtx)
-	executorCancelCtx, executorCancelCauseFunc := context.WithCancelCause(context.Background())
+	cancelCtx, cancelFunc := context.WithCancel(s.cancelCtx)
+	executorCancelCtx, executorCancelFunc := context.WithCancel(context.Background())
 	e := execution[R]{
 		id:                      uuid.New(),
 		state:                   s,
 		cancelCtx:               cancelCtx,
-		cancelCauseFunc:         cancelCauseFunc,
+		cancelFunc:              cancelFunc,
 		executorCancelCtx:       executorCancelCtx,
-		executorCancelCauseFunc: executorCancelCauseFunc,
+		executorCancelFunc:      executorCancelFunc,
 		waitGroup:               &sync.WaitGroup{},
 		logger:                  s.logger,
 		req:                     req,
@@ -371,7 +369,7 @@ func StartExecution[R any](
 
 // Stop stops all executions within the State.
 func (s *State) Stop() {
-	s.cancelCauseFunc(ErrExecutionStopped)
+	s.cancelFunc()
 	s.waitGroup.Wait()
 }
 

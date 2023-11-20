@@ -113,8 +113,6 @@ func (mr *moveRequest) Plan() (state.PlanResponse, error) {
 		if err != nil {
 			return state.PlanResponse{}, err
 		}
-		mr.logger.Errorf("poses: %#v", posesByComponent)
-		mr.logger.Errorf("geoPoses: %#v", geoPoses)
 
 		// NOTE: Here we are smuggling GeoPoses into Poses by component
 		planSteps, err := toGeoPosePlanSteps(posesByComponent, geoPoses)
