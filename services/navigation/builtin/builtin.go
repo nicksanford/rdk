@@ -682,7 +682,10 @@ func pollUntilMOGSuccessOrError(
 	logger.Debug("pollUntilMOGSuccessOrError called")
 	defer logger.Debug("pollUntilMOGSuccessOrError returning")
 	for {
-		logger.Debug("ctx.Err(): %s", ctx.Err())
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		ph, err := m.PlanHistory(ctx, req)
 		if err != nil {
 			return err
