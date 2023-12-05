@@ -556,7 +556,7 @@ func (svc *builtIn) moveToWaypoint(ctx context.Context, wp navigation.Waypoint, 
 			ComponentName: req.ComponentName,
 			ExecutionID:   executionID,
 			LastPlanOnly:  true,
-		})
+		}, svc.logger)
 
 	if err != nil {
 		return err
@@ -677,8 +677,12 @@ func pollUntilMOGSuccessOrError(
 	m motion.Service,
 	interval time.Duration,
 	req motion.PlanHistoryReq,
+	logger logging.Logger,
 ) error {
+	logger.Debug("pollUntilMOGSuccessOrError called")
+	defer logger.Debug("pollUntilMOGSuccessOrError returning")
 	for {
+		logger.Debug("ctx.Err(): %s", ctx.Err())
 		ph, err := m.PlanHistory(ctx, req)
 		if err != nil {
 			return err
