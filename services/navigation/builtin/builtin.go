@@ -397,6 +397,7 @@ func (svc *builtIn) SetMode(ctx context.Context, mode navigation.Mode, extra map
 	svc.actionMu.Lock()
 	defer svc.actionMu.Unlock()
 
+	svc.logger.Debug("before setmode RLock")
 	svc.mu.RLock()
 	svc.logger.Infof("SetMode called: transitioning from %s to %s", svc.mode, mode)
 	if svc.mode == mode {
@@ -408,8 +409,10 @@ func (svc *builtIn) SetMode(ctx context.Context, mode navigation.Mode, extra map
 	// stop passed active sessions
 	svc.stopActiveMode()
 
+	svc.logger.Debug("getting lock")
 	// switch modes
 	svc.mu.Lock()
+	svc.logger.Debug("got lock")
 	defer svc.mu.Unlock()
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	svc.wholeServiceCancelFunc = cancelFunc
@@ -603,9 +606,12 @@ func (svc *builtIn) startWaypointMode(ctx context.Context, extra map[string]inte
 }
 
 func (svc *builtIn) stopActiveMode() {
+	svc.logger.Debug("stopActiveMode called")
 	if svc.wholeServiceCancelFunc != nil {
 		svc.wholeServiceCancelFunc()
 	}
+	svc.logger.Debug("stopActiveMode waiting")
+	defer svc.logger.Debug("stopActiveMode done")
 	svc.activeBackgroundWorkers.Wait()
 }
 
