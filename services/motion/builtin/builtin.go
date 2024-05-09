@@ -22,7 +22,6 @@ import (
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/services/motion/builtin/state"
 	"go.viam.com/rdk/services/slam"
-	"go.viam.com/rdk/services/vision"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -41,7 +40,6 @@ func init() {
 			WeakDependencies: []resource.Matcher{
 				resource.TypeMatcher{Type: resource.APITypeComponentName},
 				resource.SubtypeMatcher{Subtype: slam.SubtypeName},
-				resource.SubtypeMatcher{Subtype: vision.SubtypeName},
 			},
 		},
 	)
@@ -118,7 +116,6 @@ func (ms *builtIn) Reconfigure(
 	}
 	movementSensors := make(map[resource.Name]movementsensor.MovementSensor)
 	slamServices := make(map[resource.Name]slam.Service)
-	visionServices := make(map[resource.Name]vision.Service)
 	components := make(map[resource.Name]resource.Resource)
 	for name, dep := range deps {
 		switch dep := dep.(type) {
@@ -128,15 +125,12 @@ func (ms *builtIn) Reconfigure(
 			movementSensors[name] = dep
 		case slam.Service:
 			slamServices[name] = dep
-		case vision.Service:
-			visionServices[name] = dep
 		default:
 			components[name] = dep
 		}
 	}
 	ms.movementSensors = movementSensors
 	ms.slamServices = slamServices
-	ms.visionServices = visionServices
 	ms.components = components
 	if ms.state != nil {
 		ms.state.Stop()
@@ -156,7 +150,6 @@ type builtIn struct {
 	fsService       framesystem.Service
 	movementSensors map[resource.Name]movementsensor.MovementSensor
 	slamServices    map[resource.Name]slam.Service
-	visionServices  map[resource.Name]vision.Service
 	components      map[resource.Name]resource.Resource
 	logger          logging.Logger
 	state           *state.State

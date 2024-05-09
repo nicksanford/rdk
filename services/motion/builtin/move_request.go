@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -23,7 +22,6 @@ import (
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/services/motion/builtin/state"
 	"go.viam.com/rdk/services/slam"
-	"go.viam.com/rdk/services/vision"
 	"go.viam.com/rdk/spatialmath"
 )
 
@@ -57,16 +55,15 @@ const (
 type moveRequest struct {
 	requestType requestType
 	// geoPoseOrigin is only set if requestType == requestTypeMoveOnGlobe
-	geoPoseOrigin     *spatialmath.GeoPose
-	poseOrigin        spatialmath.Pose
-	logger            logging.Logger
-	config            *validatedMotionConfiguration
-	planRequest       *motionplan.PlanRequest
-	seedPlan          motionplan.Plan
-	kinematicBase     kinematicbase.KinematicBase
-	obstacleDetectors map[vision.Service][]resource.Name
-	replanCostFactor  float64
-	fsService         framesystem.Service
+	geoPoseOrigin    *spatialmath.GeoPose
+	poseOrigin       spatialmath.Pose
+	logger           logging.Logger
+	config           *validatedMotionConfiguration
+	planRequest      *motionplan.PlanRequest
+	seedPlan         motionplan.Plan
+	kinematicBase    kinematicbase.KinematicBase
+	replanCostFactor float64
+	fsService        framesystem.Service
 
 	executeBackgroundWorkers *sync.WaitGroup
 	responseChan             chan moveResponse
@@ -95,15 +92,6 @@ func (mr *moveRequest) Plan(ctx context.Context) (motionplan.Plan, error) {
 
 	// get transient detections
 	gifs := []*referenceframe.GeometriesInFrame{}
-	for visSrvc, cameraNames := range mr.obstacleDetectors {
-		for _, camName := range cameraNames {
-			transientGifs, err := mr.getTransientDetections(ctx, visSrvc, camName, mr.poseOrigin)
-			if err != nil {
-				return nil, err
-			}
-			gifs = append(gifs, transientGifs)
-		}
-	}
 	gifs = append(gifs, existingGifs)
 
 	// update worldstate to include transient detections
@@ -166,57 +154,6 @@ func (mr *moveRequest) deviatedFromPlan(ctx context.Context, plan motionplan.Pla
 	return state.ExecuteResponse{}, nil
 }
 
-// getTransientDetections returns a list of geometries as observed by the provided vision service and camera.
-// Depending on the caller, the geometries returned are either in their relative position
-// with respect to the base or in their absolute position with respect to the world.
-func (mr *moveRequest) getTransientDetections(
-	ctx context.Context,
-	visSrvc vision.Service,
-	camName resource.Name,
-	transformBy spatialmath.Pose,
-) (*referenceframe.GeometriesInFrame, error) {
-	mr.logger.CDebugf(ctx,
-		"proceeding to get detections from vision service: %s with camera: %s",
-		visSrvc.Name().ShortName(),
-		camName.ShortName(),
-	)
-
-	detections, err := visSrvc.GetObjectPointClouds(ctx, camName.Name, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	cameraOrigin := referenceframe.NewPoseInFrame(camName.ShortName(), spatialmath.NewZeroPose())
-	cameraToBase, err := mr.fsService.TransformPose(ctx, cameraOrigin, mr.kinematicBase.Name().ShortName(), nil)
-	if err != nil {
-		mr.logger.CDebugf(ctx,
-			"we assume the base named: %s is coincident with the camera named: %s due to err: %v",
-			mr.kinematicBase.Name().ShortName(), camName.ShortName(), err.Error(),
-		)
-		cameraToBase = cameraOrigin
-	}
-
-	// transformed detections
-	transformedGeoms := []spatialmath.Geometry{}
-	for i, detection := range detections {
-		geometry := detection.Geometry
-		// update the label of the geometry so we know it is transient
-		label := camName.ShortName() + "_transientObstacle_" + strconv.Itoa(i)
-		if geometry.Label() != "" {
-			label += "_" + geometry.Label()
-		}
-		geometry.SetLabel(label)
-
-		// transform the geometry to be relative to the base frame which is +Y forwards
-		relativeGeom := geometry.Transform(cameraToBase.Pose())
-
-		// apply any transformation on the geometry defined a priori by the caller
-		transformedGeom := relativeGeom.Transform(transformBy)
-		transformedGeoms = append(transformedGeoms, transformedGeom)
-	}
-	return referenceframe.NewGeometriesInFrame(referenceframe.World, transformedGeoms), nil
-}
-
 // obstaclesIntersectPlan takes a list of waypoints and an index of a waypoint on that Plan and reports an error indicating
 // whether or not any obstacle detectors report geometries in positions which would cause a collision with the executor
 // following the Plan.
@@ -224,94 +161,7 @@ func (mr *moveRequest) obstaclesIntersectPlan(
 	ctx context.Context,
 	plan motionplan.Plan,
 ) (state.ExecuteResponse, error) {
-	// if the camera is mounted on something InputEnabled that isn't the base, then that
-	// input needs to be known in order to properly calculate the pose of the obstacle
-	// furthermore, if that InputEnabled thing has moved since this moveRequest was initialized
-	// (due to some other non-motion call for example), then we can't just get current inputs
-	// we need the original input to place that thing in its original position
-	// hence, cached CurrentInputs from the start are used i.e. mr.planRequest.StartConfiguration
-	existingGifs, err := mr.planRequest.WorldState.ObstaclesInWorldFrame(
-		mr.planRequest.FrameSystem, mr.planRequest.StartConfiguration,
-	)
-	if err != nil {
-		return state.ExecuteResponse{}, err
-	}
 
-	// get the current position of the base
-	currentPosition, err := mr.kinematicBase.CurrentPosition(ctx)
-	if err != nil {
-		return state.ExecuteResponse{}, err
-	}
-
-	for visSrvc, cameraNames := range mr.obstacleDetectors {
-		for _, camName := range cameraNames {
-			// Note: detections are initially observed from the camera frame but must be transformed to be in
-			// world frame. We cannot use the inputs of the base to transform the detections since they are relative.
-			gifs, err := mr.getTransientDetections(ctx, visSrvc, camName, currentPosition.Pose())
-			if err != nil {
-				return state.ExecuteResponse{}, err
-			}
-			if len(gifs.Geometries()) == 0 {
-				mr.logger.CDebug(ctx, "will not check if obstacles intersect path since nothing was detected")
-				return state.ExecuteResponse{}, nil
-			}
-
-			// construct new worldstate
-			worldState, err := referenceframe.NewWorldState([]*referenceframe.GeometriesInFrame{existingGifs, gifs}, nil)
-			if err != nil {
-				return state.ExecuteResponse{}, err
-			}
-
-			// build representation of frame system's inputs
-			currentInputs, err := mr.kinematicBase.CurrentInputs(ctx)
-			if err != nil {
-				return state.ExecuteResponse{}, err
-			}
-			inputMap := referenceframe.StartPositions(mr.planRequest.FrameSystem)
-			inputMap[mr.kinematicBase.Name().ShortName()] = currentInputs
-
-			// get the current position of the base
-			currentPosition, err := mr.kinematicBase.CurrentPosition(ctx)
-			if err != nil {
-				return state.ExecuteResponse{}, err
-			}
-
-			// Note: the value of wayPointIndex is subject to change between when this function is first entered
-			// versus when CheckPlan is actually called.
-			// We load the wayPointIndex value to ensure that all information is up to date.
-
-			// get the pose difference between where the robot is versus where it ought to be.
-			errorState, err := mr.kinematicBase.ErrorState(ctx)
-			if err != nil {
-				return state.ExecuteResponse{}, err
-			}
-
-			mr.logger.CDebugf(ctx, "CheckPlan inputs: \n currentPosition: %v\n currentInputs: %v\n errorState: %v\n worldstate: %s",
-				spatialmath.PoseToProtobuf(currentPosition.Pose()),
-				currentInputs,
-				spatialmath.PoseToProtobuf(errorState),
-				worldState.String(),
-			)
-
-			// TODO(pl): This was disabled as part of course correction. It will need to be re-enabled once a method is developed to surface
-			// course-corrected plans from the kinematic base to the motion service.
-			// if err := motionplan.CheckPlan(
-			// mr.kinematicBase.Kinematics(), // frame we wish to check for collisions
-			// plan,
-			// waypointIndex,
-			// worldState, // detected obstacles by this instance of camera + service
-			// mr.planRequest.FrameSystem,
-			// currentPosition.Pose(), // currentPosition of robot accounts for errorState
-			// inputMap,
-			// errorState, // deviation of robot from plan
-			// lookAheadDistanceMM,
-			// mr.planRequest.Logger,
-			// ); err != nil {
-			// mr.planRequest.Logger.CInfo(ctx, err.Error())
-			// return state.ExecuteResponse{Replan: true, ReplanReason: err.Error()}, nil
-			// }
-		}
-	}
 	return state.ExecuteResponse{}, nil
 }
 
@@ -702,25 +552,6 @@ func (ms *builtIn) createBaseMoveRequest(
 		return nil, err
 	}
 
-	obstacleDetectors := make(map[vision.Service][]resource.Name)
-	for _, obstacleDetectorNamePair := range motionCfg.obstacleDetectors {
-		// get vision service
-		visionServiceName := obstacleDetectorNamePair.VisionServiceName
-		visionSvc, ok := ms.visionServices[visionServiceName]
-		if !ok {
-			return nil, resource.DependencyNotFoundError(visionServiceName)
-		}
-
-		// add camera to vision service map
-		camList, ok := obstacleDetectors[visionSvc]
-		if !ok {
-			obstacleDetectors[visionSvc] = []resource.Name{obstacleDetectorNamePair.CameraName}
-		} else {
-			camList = append(camList, obstacleDetectorNamePair.CameraName)
-			obstacleDetectors[visionSvc] = camList
-		}
-	}
-
 	currentInputs, _, err := ms.fsService.CurrentInputs(ctx)
 	if err != nil {
 		return nil, err
@@ -753,11 +584,10 @@ func (ms *builtIn) createBaseMoveRequest(
 			WorldState:         worldState,
 			Options:            valExtra.extra,
 		},
-		poseOrigin:        startPose,
-		kinematicBase:     kb,
-		replanCostFactor:  valExtra.replanCostFactor,
-		obstacleDetectors: obstacleDetectors,
-		fsService:         ms.fsService,
+		poseOrigin:       startPose,
+		kinematicBase:    kb,
+		replanCostFactor: valExtra.replanCostFactor,
+		fsService:        ms.fsService,
 
 		executeBackgroundWorkers: &backgroundWorkers,
 
