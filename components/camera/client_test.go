@@ -3,6 +3,7 @@ package camera_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -14,21 +15,31 @@ import (
 	"github.com/pion/rtp"
 	"go.viam.com/test"
 	"go.viam.com/utils/rpc"
+	"go.viam.com/utils/testutils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/components/camera/fake"
 	"go.viam.com/rdk/components/camera/rtppassthrough"
+	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/gostream"
+	"go.viam.com/rdk/gostream/codec/opus"
+	"go.viam.com/rdk/gostream/codec/x264"
 	viamgrpc "go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
 	"go.viam.com/rdk/rimage/transform"
-	"go.viam.com/rdk/testutils"
+	"go.viam.com/rdk/robot"
+	robotimpl "go.viam.com/rdk/robot/impl"
+	"go.viam.com/rdk/robot/web"
+	weboptions "go.viam.com/rdk/robot/web/options"
+	rdktestutils "go.viam.com/rdk/testutils"
 	"go.viam.com/rdk/testutils/inject"
+	"go.viam.com/rdk/testutils/robottestutils"
 	rutils "go.viam.com/rdk/utils"
 	"go.viam.com/rdk/utils/contextutils"
 )
@@ -153,7 +164,7 @@ func TestClient(t *testing.T) {
 	test.That(t, ok, test.ShouldBeTrue)
 	test.That(t, resourceAPI.RegisterRPCService(context.Background(), rpcServer, cameraSvc), test.ShouldBeNil)
 
-	injectCamera.DoFunc = testutils.EchoFunc
+	injectCamera.DoFunc = rdktestutils.EchoFunc
 
 	go rpcServer.Serve(listener1)
 	defer rpcServer.Stop()
@@ -211,10 +222,10 @@ func TestClient(t *testing.T) {
 		test.That(t, images[1].Image.ColorModel(), test.ShouldHaveSameTypeAs, color.Gray16Model)
 
 		// Do
-		resp, err := camera1Client.DoCommand(context.Background(), testutils.TestCommand)
+		resp, err := camera1Client.DoCommand(context.Background(), rdktestutils.TestCommand)
 		test.That(t, err, test.ShouldBeNil)
-		test.That(t, resp["command"], test.ShouldEqual, testutils.TestCommand["command"])
-		test.That(t, resp["data"], test.ShouldEqual, testutils.TestCommand["data"])
+		test.That(t, resp["command"], test.ShouldEqual, rdktestutils.TestCommand["command"])
+		test.That(t, resp["data"], test.ShouldEqual, rdktestutils.TestCommand["data"])
 
 		test.That(t, camera1Client.Close(context.Background()), test.ShouldBeNil)
 		test.That(t, conn.Close(), test.ShouldBeNil)
@@ -676,4 +687,333 @@ func TestRTPPassthroughWithoutWebRTC(t *testing.T) {
 
 		test.That(t, conn.Close(), test.ShouldBeNil)
 	})
+}
+
+var (
+	Green   = "\033[32m"
+	Red     = "\033[31m"
+	Magenta = "\033[35m"
+	Cyan    = "\033[36m"
+	Yellow  = "\033[33m"
+	Reset   = "\033[0m"
+)
+
+// this helps make the test case much easier to read.
+func greenLog(t *testing.T, msg string) {
+	t.Log(Green + msg + Reset)
+}
+
+func TestReconnectToRemoveAfterReboot(t *testing.T) {
+	logger := logging.NewTestLogger(t).Sublogger(t.Name())
+	ctx := context.Background()
+
+	remoteCfg := &config.Config{
+		Components: []resource.Config{
+			{
+				Name:  "rtpPassthroughCamera",
+				API:   resource.NewAPI("rdk", "component", "camera"),
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					RTPPassthrough: true,
+				},
+			},
+		},
+	}
+
+	remote, err := robotimpl.New(ctx, remoteCfg, logger.Sublogger("remote"), robotimpl.WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+
+	options, listner, addr := robottestutils.CreateBaseOptionsAndListener(t)
+	test.That(t, remote.StartWeb(ctx, options), test.ShouldBeNil)
+
+	mainCfg := &config.Config{
+		Remotes: []config.Remote{
+			{
+				Name:     "remote",
+				Address:  addr,
+				Insecure: true,
+			},
+		},
+	}
+
+	main, err := robotimpl.New(ctx, mainCfg, logger.Sublogger("main"), robotimpl.WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	defer main.Close(ctx)
+
+	greenLog(t, "robot setup")
+
+	greenLog(t, fmt.Sprintf("ResourceRPCAPIs before close: %#v", main.ResourceRPCAPIs()))
+	greenLog(t, fmt.Sprintf("ResourceNames before close: %#v", main.ResourceNames()))
+
+	expectedResources := []resource.Name{
+		camera.Named("remote:rtpPassthroughCamera"),
+	}
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	cameraClient, err := camera.FromRobot(main, "remote:rtpPassthroughCamera")
+	test.That(t, err, test.ShouldBeNil)
+
+	image, _, err := cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, image, test.ShouldNotBeNil)
+	greenLog(t, "got images")
+
+	greenLog(t, "calling close on remote")
+	test.That(t, remote.Close(ctx), test.ShouldBeNil)
+	greenLog(t, "close called on remote")
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), []resource.Name{})
+	})
+
+	greenLog(t, "confirming images returns an error")
+	_, _, err = cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeError)
+
+	remote2, err := robotimpl.New(ctx, remoteCfg, logger.Sublogger("remote-post-reboot"), robotimpl.WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	defer func() { test.That(t, remote2.Close(ctx), test.ShouldBeNil) }()
+
+	// Note: There's a slight chance this test can fail if someone else
+	// claims the port we just released by closing the server.
+	listner, err = net.Listen("tcp", listner.Addr().String())
+	test.That(t, err, test.ShouldBeNil)
+	options.Network.Listener = listner
+	err = remote2.StartWeb(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	greenLog(t, "confirming images is returns success")
+	timeoutCtx, timeoutFn := context.WithTimeout(context.Background(), time.Second*10)
+	defer timeoutFn()
+	for timeoutCtx.Err() == nil {
+		_, _, err = cameraClient.Images(ctx)
+		if err == nil {
+			break
+		}
+		t.Log(err.Error())
+		time.Sleep(time.Millisecond * 50)
+	}
+	test.That(t, timeoutCtx.Err(), test.ShouldBeNil)
+}
+
+func TestReconnectToRemoveAfterReboot2(t *testing.T) {
+	logger := logging.NewTestLogger(t).Sublogger(t.Name())
+	ctx := context.Background()
+
+	remoteCfg1 := &config.Config{
+		Components: []resource.Config{
+			{
+				Name:  "rtpPassthroughCamera",
+				API:   resource.NewAPI("rdk", "component", "camera"),
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					RTPPassthrough: true,
+				},
+			},
+		},
+	}
+
+	optionsRemote, listnerRemote, addrRemote := robottestutils.CreateBaseOptionsAndListener(t)
+	remoteRobot1, remoteWebSvc1 := setupStreamingRobotWithOptions(t, remoteCfg1, logger.Sublogger("remote-1"), optionsRemote)
+
+	mainCfg := &config.Config{
+		Remotes: []config.Remote{
+			{
+				Name:     "remote",
+				Address:  addrRemote,
+				Insecure: true,
+			},
+		},
+	}
+
+	optionsMain, _, _ := robottestutils.CreateBaseOptionsAndListener(t)
+	main, mainWebSvc := setupStreamingRobotWithOptions(t, mainCfg, logger.Sublogger("main"), optionsMain)
+	greenLog(t, "robot setup")
+	defer main.Close(ctx)
+	defer mainWebSvc.Close(ctx)
+
+	expectedResources := []resource.Name{
+		camera.Named("remote:rtpPassthroughCamera"),
+	}
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 30, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	greenLog(t, fmt.Sprintf("ResourceRPCAPIs before close: %#v", main.ResourceRPCAPIs()))
+	greenLog(t, fmt.Sprintf("ResourceNames before close: %#v", main.ResourceNames()))
+
+	cameraClient, err := camera.FromRobot(main, "remote:rtpPassthroughCamera")
+	test.That(t, err, test.ShouldBeNil)
+
+	image, _, err := cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, image, test.ShouldNotBeNil)
+	greenLog(t, "got images")
+
+	greenLog(t, "calling close")
+	test.That(t, remoteRobot1.Close(ctx), test.ShouldBeNil)
+	test.That(t, remoteWebSvc1.Close(ctx), test.ShouldBeNil)
+	greenLog(t, "close called")
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 30, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), []resource.Name{})
+	})
+
+	greenLog(t, "confirming images returns an error")
+	_, _, err = cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeError)
+
+	// bind second instance of remote to the same port as the first
+	listnerRemote, err = net.Listen("tcp", listnerRemote.Addr().String())
+	test.That(t, err, test.ShouldBeNil)
+	optionsRemote.Network.Listener = listnerRemote
+	remote2Second, remote2SecondWeb := setupStreamingRobotWithOptions(t, remoteCfg1, logger.Sublogger("remote-second"), optionsRemote)
+	defer remote2Second.Close(ctx)
+	defer remote2SecondWeb.Close(ctx)
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	greenLog(t, "confirming images is returns success")
+	timeoutCtx, timeoutFn := context.WithTimeout(context.Background(), time.Second*10)
+	defer timeoutFn()
+	for timeoutCtx.Err() == nil {
+		_, _, err = cameraClient.Images(ctx)
+		if err == nil {
+			break
+		}
+		t.Log(err.Error())
+		time.Sleep(time.Millisecond * 50)
+	}
+	test.That(t, timeoutCtx.Err(), test.ShouldBeNil)
+}
+
+func setupStreamingRobotWithOptions(
+	t *testing.T,
+	robotConfig *config.Config,
+	logger logging.Logger,
+	options weboptions.Options,
+) (robot.LocalRobot, web.Service) {
+	t.Helper()
+
+	ctx := context.Background()
+	robot, err := robotimpl.RobotFromConfig(ctx, robotConfig, logger)
+	test.That(t, err, test.ShouldBeNil)
+
+	// We initialize with a stream config such that the stream server is capable of creating video stream and
+	// audio stream data.
+	webSvc := web.New(robot, logger, web.WithStreamConfig(gostream.StreamConfig{
+		AudioEncoderFactory: opus.NewEncoderFactory(),
+		VideoEncoderFactory: x264.NewEncoderFactory(),
+	}))
+	err = webSvc.Start(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	return robot, webSvc
+}
+
+// TODO: Get this working
+func TestRemoteUnreachableTriggersClientClose(t *testing.T) {
+	logger := logging.NewTestLogger(t).Sublogger(t.Name())
+	ctx := context.Background()
+
+	remoteCfg2 := &config.Config{
+		Components: []resource.Config{
+			{
+				Name:  "rtpPassthroughCamera",
+				API:   resource.NewAPI("rdk", "component", "camera"),
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					RTPPassthrough: true,
+				},
+			},
+		},
+	}
+
+	optionsRemote2, listnerRemote2, addrRemote2 := robottestutils.CreateBaseOptionsAndListener(t)
+	remote2, remoteWebSvc2 := setupStreamingRobotWithOptions(t, remoteCfg2, logger.Sublogger("remote-2"), optionsRemote2)
+
+	remoteCfg1 := &config.Config{
+		Remotes: []config.Remote{
+			{
+				Name:     "remote-2",
+				Address:  addrRemote2,
+				Insecure: true,
+			},
+		},
+	}
+
+	optionsRemote1, _, addrRemote1 := robottestutils.CreateBaseOptionsAndListener(t)
+	remote1, remoteWebSvc1 := setupStreamingRobotWithOptions(t, remoteCfg1, logger.Sublogger("remote-1"), optionsRemote1)
+	defer remote1.Close(ctx)
+	defer remoteWebSvc1.Close(ctx)
+
+	mainCfg := &config.Config{
+		Remotes: []config.Remote{
+			{
+				Name:     "remote-1",
+				Address:  addrRemote1,
+				Insecure: true,
+			},
+		},
+	}
+
+	optionsMain, _, _ := robottestutils.CreateBaseOptionsAndListener(t)
+	main, mainWebSvc := setupStreamingRobotWithOptions(t, mainCfg, logger.Sublogger("remote-1"), optionsMain)
+	defer main.Close(ctx)
+	defer mainWebSvc.Close(ctx)
+	greenLog(t, "robot setup")
+
+	expectedResources := []resource.Name{
+		camera.Named("remote-1:remote-2:rtpPassthroughCamera"),
+	}
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 30, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	greenLog(t, fmt.Sprintf("ResourceRPCAPIs before close: %#v", main.ResourceRPCAPIs()))
+	greenLog(t, fmt.Sprintf("ResourceNames before close: %#v", main.ResourceNames()))
+
+	cameraClient, err := camera.FromRobot(main, "remote-1:remote-2:rtpPassthroughCamera")
+	test.That(t, err, test.ShouldBeNil)
+
+	image, _, err := cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, image, test.ShouldNotBeNil)
+	greenLog(t, "got images")
+
+	greenLog(t, "calling close")
+	test.That(t, remote2.Close(ctx), test.ShouldBeNil)
+	test.That(t, remoteWebSvc2.Close(ctx), test.ShouldBeNil)
+	greenLog(t, "close called")
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), []resource.Name{})
+	})
+
+	_, _, err = cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeError)
+
+	listnerRemote2, err = net.Listen("tcp", listnerRemote2.Addr().String())
+	test.That(t, err, test.ShouldBeNil)
+	optionsRemote2.Network.Listener = listnerRemote2
+	remote2Second, remote2SecondWeb := setupStreamingRobotWithOptions(t, remoteCfg2, logger.Sublogger("remote-second"), optionsRemote2)
+	defer remote2Second.Close(ctx)
+	defer remote2SecondWeb.Close(ctx)
+
+	greenLog(t, "waiting for second instance to come up")
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, main.ResourceNames(), expectedResources)
+	})
+
+	image, _, err = cameraClient.Images(ctx)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, image, test.ShouldNotBeNil)
 }

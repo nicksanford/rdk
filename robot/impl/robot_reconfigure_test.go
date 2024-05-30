@@ -34,8 +34,13 @@ import (
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/components/servo"
 	"go.viam.com/rdk/config"
+	"go.viam.com/rdk/gostream"
+	"go.viam.com/rdk/gostream/codec/opus"
+	"go.viam.com/rdk/gostream/codec/x264"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/robot"
+	"go.viam.com/rdk/robot/web"
 	_ "go.viam.com/rdk/services/datamanager/builtin"
 	"go.viam.com/rdk/services/motion"
 	_ "go.viam.com/rdk/services/motion/builtin"
@@ -2640,6 +2645,13 @@ func TestRemoteRobotsGold(t *testing.T) {
 	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
 		rdktestutils.VerifySameResourceNames(tb, r.ResourceNames(), mainPartAndFooAndBarResources)
 	})
+
+	// confirm that one can actually make successful requests to the resources in question
+	a, err := arm.FromRobot(r, "bar:remoteArm")
+	test.That(t, err, test.ShouldBeNil)
+	_, err = a.IsMoving(ctx)
+	test.That(t, err, test.ShouldBeNil)
+
 	test.That(t, remote2.Close(context.Background()), test.ShouldBeNil)
 
 	// wait for local_robot to detect that the remote is now offline
@@ -2669,6 +2681,171 @@ func TestRemoteRobotsGold(t *testing.T) {
 	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
 		rdktestutils.VerifySameResourceNames(tb, r.ResourceNames(), mainPartAndFooAndBarResources)
 	})
+
+	_, err = a.IsMoving(ctx)
+	test.That(t, err, test.ShouldBeNil)
+}
+
+func TestRemoteRobotsGoldWithRobotFromConfig(t *testing.T) {
+	// This tests that a main part is able to start up with an offline remote robot, connect to it and
+	// depend on the remote robot's resources when it comes online. And react appropriately when the remote robot goes offline again.
+
+	// If a new robot object/process comes online at the same address+port, the main robot should still be able
+	// to use the new remote robot's resources.
+
+	// To do so, the test initially sets up two remote robots, Remote 1 and 2, and then a third remote, Remote 3,
+	// in the following scenario:
+	// 1) Remote 1's server is started.
+	// 2) The main robot is then set up with resources that depend on resources on both Remote 1 and 2. Since
+	//    Remote 2 is not up, their resources are not available to the main robot.
+	// 3) After initial configuration, Remote 2's server starts up and the main robot should then connect
+	//	  and pick up the new available resources.
+	// 4) Remote 2 goes down, and the main robot should remove any resources or resources that depend on
+	//    resources from Remote 2.
+	// 5) Remote 3 comes online at the same address as Remote 2, and the main robot should treat it the same as
+	//    if Remote 2 came online again and re-add all the removed resources.
+	logger := logging.NewTestLogger(t)
+	remoteConfig := &config.Config{
+		Components: []resource.Config{
+			{
+				Name:  "remoteArm",
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					ModelFilePath: "../../components/arm/fake/fake_model.json",
+				},
+				API: arm.API,
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	// set up and start remote1's web service
+	remote1, err := New(ctx, remoteConfig, logger.Sublogger("remote1"), WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	defer func() { test.That(t, remote1.Close(ctx), test.ShouldBeNil) }()
+
+	options, _, addr1 := robottestutils.CreateBaseOptionsAndListener(t)
+	err = remote1.StartWeb(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	// set up but do not start remote2's web service
+	remote2, err := New(ctx, remoteConfig, logger.Sublogger("remote2"), WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	options, listener2, addr2 := robottestutils.CreateBaseOptionsAndListener(t)
+	defer func() { test.That(t, remote2.Close(ctx), test.ShouldBeNil) }()
+
+	localConfig := &config.Config{
+		Components: []resource.Config{
+			{
+				Name:  "arm1",
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					ModelFilePath: "../../components/arm/fake/fake_model.json",
+				},
+				API:       arm.API,
+				DependsOn: []string{"foo:remoteArm"},
+			},
+			{
+				Name:  "arm2",
+				Model: resource.DefaultModelFamily.WithModel("fake"),
+				ConvertedAttributes: &fake.Config{
+					ModelFilePath: "../../components/arm/fake/fake_model.json",
+				},
+				API:       arm.API,
+				DependsOn: []string{"bar:remoteArm"},
+			},
+		},
+		Services: []resource.Config{},
+		Remotes: []config.Remote{
+			{
+				Name:    "foo",
+				Address: addr1,
+			},
+			{
+				Name:    "bar",
+				Address: addr2,
+			},
+		},
+	}
+	r, err := New(ctx, localConfig, logger.Sublogger("main"), WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	defer func() { test.That(t, r.Close(ctx), test.ShouldBeNil) }()
+
+	// assert all of remote1's resources exist on main but none of remote2's
+	rdktestutils.VerifySameResourceNames(
+		t,
+		r.ResourceNames(),
+		[]resource.Name{
+			motion.Named(resource.DefaultServiceName),
+			sensors.Named(resource.DefaultServiceName),
+			arm.Named("arm1"),
+			arm.Named("foo:remoteArm"),
+			motion.Named("foo:builtin"),
+			sensors.Named("foo:builtin"),
+		},
+	)
+
+	// start remote2's web service
+	err = remote2.StartWeb(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	mainPartAndFooAndBarResources := []resource.Name{
+		motion.Named(resource.DefaultServiceName),
+		sensors.Named(resource.DefaultServiceName),
+		arm.Named("arm1"),
+		arm.Named("arm2"),
+		arm.Named("foo:remoteArm"),
+		motion.Named("foo:builtin"),
+		sensors.Named("foo:builtin"),
+		arm.Named("bar:remoteArm"),
+		motion.Named("bar:builtin"),
+		sensors.Named("bar:builtin"),
+	}
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, r.ResourceNames(), mainPartAndFooAndBarResources)
+	})
+
+	// confirm that one can actually make successful requests to the resources in question
+	a, err := arm.FromRobot(r, "bar:remoteArm")
+	test.That(t, err, test.ShouldBeNil)
+	_, err = a.IsMoving(ctx)
+	test.That(t, err, test.ShouldBeNil)
+
+	test.That(t, remote2.Close(context.Background()), test.ShouldBeNil)
+
+	// wait for local_robot to detect that the remote is now offline
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, r.ResourceNames(),
+			[]resource.Name{
+				motion.Named(resource.DefaultServiceName),
+				sensors.Named(resource.DefaultServiceName),
+				arm.Named("arm1"),
+				arm.Named("foo:remoteArm"),
+				motion.Named("foo:builtin"),
+				sensors.Named("foo:builtin"),
+			},
+		)
+	})
+
+	remote3, err := New(ctx, remoteConfig, logger.Sublogger("remote3"), WithViamHomeDir(t.TempDir()))
+	test.That(t, err, test.ShouldBeNil)
+	defer func() { test.That(t, remote3.Close(ctx), test.ShouldBeNil) }()
+
+	// Note: There's a slight chance this test can fail if someone else
+	// claims the port we just released by closing the server.
+	listener2, err = net.Listen("tcp", listener2.Addr().String())
+	test.That(t, err, test.ShouldBeNil)
+	options.Network.Listener = listener2
+	err = remote3.StartWeb(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	testutils.WaitForAssertionWithSleep(t, time.Millisecond*100, 300, func(tb testing.TB) {
+		rdktestutils.VerifySameResourceNames(tb, r.ResourceNames(), mainPartAndFooAndBarResources)
+	})
+
+	_, err = a.IsMoving(ctx)
+	test.That(t, err, test.ShouldBeNil)
 }
 
 func TestRemoteRobotsUpdate(t *testing.T) {
@@ -3618,4 +3795,28 @@ func (m *mockFake2) Reconfigure(ctx context.Context, deps resource.Dependencies,
 func (m *mockFake2) Close(ctx context.Context) error {
 	m.closeCount++
 	return nil
+}
+
+func setupRealRobot(
+	t *testing.T,
+	robotConfig *config.Config,
+	logger logging.Logger,
+) (context.Context, robot.LocalRobot, string, web.Service) {
+	t.Helper()
+
+	ctx := context.Background()
+	robot, err := RobotFromConfig(ctx, robotConfig, logger)
+	test.That(t, err, test.ShouldBeNil)
+
+	// We initialize with a stream config such that the stream server is capable of creating video stream and
+	// audio stream data.
+	webSvc := web.New(robot, logger, web.WithStreamConfig(gostream.StreamConfig{
+		AudioEncoderFactory: opus.NewEncoderFactory(),
+		VideoEncoderFactory: x264.NewEncoderFactory(),
+	}))
+	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
+	err = webSvc.Start(ctx, options)
+	test.That(t, err, test.ShouldBeNil)
+
+	return ctx, robot, addr, webSvc
 }
