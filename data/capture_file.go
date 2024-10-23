@@ -85,7 +85,7 @@ func ReadCaptureFile(f *os.File) (*CaptureFile, error) {
 }
 
 // NewCaptureFile creates a new *CaptureFile with the specified md in the specified directory.
-func NewCaptureFile(dir string, md *v1.DataCaptureMetadata) (*CaptureFile, error) {
+func NewCaptureFile(dir string, md *MetaData) (*CaptureFile, error) {
 	fileName := CaptureFilePathWithReplacedReservedChars(
 		filepath.Join(dir, getFileTimestampName()) + InProgressCaptureFileExt)
 	//nolint:gosec
@@ -95,7 +95,7 @@ func NewCaptureFile(dir string, md *v1.DataCaptureMetadata) (*CaptureFile, error
 	}
 
 	// Then write first metadata message to the file.
-	n, err := pbutil.WriteDelimited(f, md)
+	n, err := pbutil.WriteDelimited(f, md.ToProto())
 	if err != nil {
 		return nil, err
 	}

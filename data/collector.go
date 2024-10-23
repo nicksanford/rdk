@@ -5,7 +5,6 @@ package data
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 	v1 "go.viam.com/api/app/datasync/v1"
-	pb "go.viam.com/api/common/v1"
 	"go.viam.com/utils"
 	"go.viam.com/utils/protoutils"
 	"google.golang.org/grpc/codes"
@@ -30,7 +28,7 @@ import (
 var sleepCaptureCutoff = 2 * time.Millisecond
 
 // CaptureFunc allows the creation of simple Capturers with anonymous functions.
-type CaptureFunc func(ctx context.Context, params map[string]*anypb.Any) (interface{}, error)
+type CaptureFunc func(ctx context.Context, params map[string]*anypb.Any) (CollectorResponse, error)
 
 // FromDMContextKey is used to check whether the context is from data management.
 // Deprecated: use a camera.Extra with camera.NewContext instead.
@@ -57,7 +55,7 @@ type Collector interface {
 
 type collector struct {
 	clock          clock.Clock
-	captureResults chan *v1.SensorData
+	captureResults chan CaptureResponseWithTimeStamps
 	captureErrors  chan error
 	interval       time.Duration
 	params         map[string]*anypb.Any
@@ -171,11 +169,108 @@ func (c *collector) tickerBasedCapture(started chan struct{}) {
 	}
 }
 
-func (c *collector) getAndPushNextReading() {
-	timeRequested := timestamppb.New(c.clock.Now().UTC())
-	reading, err := c.captureFunc(c.cancelCtx, c.params)
-	timeReceived := timestamppb.New(c.clock.Now().UTC())
+type BoundingBox struct {
+	Label          string
+	XMinNormalized float64
+	YMinNormalized float64
+	XMaxNormalized float64
+	YMaxNormalized float64
+}
 
+type Binary struct {
+	Payload            []byte
+	TimeStampsOverride *TimeStamps
+	Tags               []string
+	BoundingBoxes      []BoundingBox
+}
+
+type Struct struct {
+	Payload            *structpb.Struct
+	TimeStampsOverride *TimeStamps
+	Tags               []string
+}
+
+type CollectorResponse struct {
+	IsBinary bool
+	Binaries []Binary
+	StructPB *Struct
+}
+
+type TimeStamps struct {
+	Requested time.Time
+	Received  time.Time
+}
+
+type CaptureResponseWithTimeStamps struct {
+	CollectorResponse
+	TimeStamps
+}
+
+func (c CollectorResponse) Valid() bool {
+	validBinary := c.IsBinary && len(c.Binaries) > 0 && c.StructPB == nil
+	validStruct := !c.IsBinary && len(c.Binaries) == 0 && c.StructPB != nil
+	return validBinary || validStruct
+}
+
+func (c CaptureResponseWithTimeStamps) ProtoItems() []*v1.SensorData {
+	if c.IsBinary {
+		var ret []*v1.SensorData
+		for _, b := range c.Binaries {
+			requested := c.TimeStamps.Requested
+			received := c.TimeStamps.Received
+			if b.TimeStampsOverride != nil {
+				requested = b.TimeStampsOverride.Requested
+				received = b.TimeStampsOverride.Requested
+			}
+			ret = append(ret, &v1.SensorData{
+				Metadata: &v1.SensorMetadata{
+					TimeRequested: timestamppb.New(requested.UTC()),
+					TimeReceived:  timestamppb.New(received.UTC()),
+					// Tags
+					// BoundingBoxes
+				},
+				Data: &v1.SensorData_Binary{
+					Binary: b.Payload,
+				},
+			},
+			)
+		}
+		return ret
+	}
+
+	requested := c.TimeStamps.Requested
+	received := c.TimeStamps.Received
+	if c.StructPB.TimeStampsOverride != nil {
+		requested = c.StructPB.TimeStampsOverride.Requested
+		received = c.StructPB.TimeStampsOverride.Requested
+	}
+	return []*v1.SensorData{
+		{
+			Metadata: &v1.SensorMetadata{
+				TimeRequested: timestamppb.New(requested.UTC()),
+				TimeReceived:  timestamppb.New(received.UTC()),
+				// Tags
+				// BoundingBoxes
+			},
+			Data: &v1.SensorData_Struct{
+				Struct: c.StructPB.Payload,
+			},
+		},
+	}
+}
+
+func (c *collector) captureWithTS() (CaptureResponseWithTimeStamps, error) {
+	requested := c.clock.Now()
+	res, err := c.captureFunc(c.cancelCtx, c.params)
+	if err != nil {
+		return CaptureResponseWithTimeStamps{}, err
+	}
+	received := c.clock.Now()
+	return CaptureResponseWithTimeStamps{res, TimeStamps{requested, received}}, nil
+}
+
+func (c *collector) getAndPushNextReading() {
+	res, err := c.captureWithTS()
 	if c.cancelCtx.Err() != nil {
 		return
 	}
@@ -189,56 +284,16 @@ func (c *collector) getAndPushNextReading() {
 		return
 	}
 
-	var msg v1.SensorData
-	switch v := reading.(type) {
-	case []byte:
-		msg = v1.SensorData{
-			Metadata: &v1.SensorMetadata{
-				TimeRequested: timeRequested,
-				TimeReceived:  timeReceived,
-			},
-			Data: &v1.SensorData_Binary{
-				Binary: v,
-			},
-		}
-	default:
-		// If it's not bytes, it's a struct.
-		var pbReading *structpb.Struct
-		var err error
-
-		if reflect.TypeOf(reading) == reflect.TypeOf(pb.GetReadingsResponse{}) {
-			// We special-case the GetReadingsResponse because it already contains
-			// structpb.Values in it, and the StructToStructPb logic does not handle
-			// that cleanly.
-			topLevelMap := make(map[string]*structpb.Value)
-			topLevelMap["readings"] = structpb.NewStructValue(
-				&structpb.Struct{Fields: reading.(pb.GetReadingsResponse).Readings},
-			)
-			pbReading = &structpb.Struct{Fields: topLevelMap}
-		} else {
-			pbReading, err = protoutils.StructToStructPbIgnoreOmitEmpty(reading)
-			if err != nil {
-				c.captureErrors <- errors.Wrap(err, "error while converting reading to structpb.Struct")
-				return
-			}
-		}
-
-		msg = v1.SensorData{
-			Metadata: &v1.SensorMetadata{
-				TimeRequested: timeRequested,
-				TimeReceived:  timeReceived,
-			},
-			Data: &v1.SensorData_Struct{
-				Struct: pbReading,
-			},
-		}
+	if !res.Valid() {
+		c.captureErrors <- errors.New("collector returned invalid response")
+		return
 	}
 
 	select {
 	// If c.captureResults is full, c.captureResults <- a can block indefinitely. This additional select block allows cancel to
 	// still work when this happens.
 	case <-c.cancelCtx.Done():
-	case c.captureResults <- &msg:
+	case c.captureResults <- res:
 	}
 }
 
@@ -257,7 +312,7 @@ func NewCollector(captureFunc CaptureFunc, params CollectorParams) (Collector, e
 		c = params.Clock
 	}
 	return &collector{
-		captureResults:   make(chan *v1.SensorData, params.QueueSize),
+		captureResults:   make(chan CaptureResponseWithTimeStamps, params.QueueSize),
 		captureErrors:    make(chan error, params.QueueSize),
 		interval:         params.Interval,
 		params:           params.MethodParams,

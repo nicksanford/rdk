@@ -120,8 +120,11 @@ func newCaptureAllFromCameraCollector(resource interface{}, params data.Collecto
 		}
 
 		return &servicepb.CaptureAllFromCameraResponse{
-			Image: protoImage, Detections: protoDetections, Classifications: protoClassifications,
-			Objects: protoObjects, Extra: boundsPb,
+			Image:           protoImage,
+			Detections:      protoDetections,
+			Classifications: protoClassifications,
+			Objects:         protoObjects,
+			Extra:           boundsPb,
 		}, nil
 	})
 
