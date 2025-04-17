@@ -232,6 +232,28 @@ func (vs *videoSource) Image(ctx context.Context, mimeType string, extra map[str
 	return imgBytes, ImageMetadata{MimeType: mimeType}, nil
 }
 
+func (vs *videoSource) Readings(ctx context.Context, req ReadingsRequest) (ReadingsResponse, error) {
+	ctx, span := trace.StartSpan(ctx, "camera::videoSource::Readings")
+	defer span.End()
+	if c, ok := vs.actualSource.(ReadingsSource); ok {
+		return c.Readings(ctx, req)
+	}
+	img, release, err := ReadImage(ctx, vs.videoSource)
+	if err != nil {
+		return ReadingsResponse{}, errors.Wrap(err, "videoSource: call to get Images failed")
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	ts := time.Now()
+	return ReadingsResponse{
+	Readings: map[string]Reading{"": Reading{Data: }},
+		Metadata: ReadingMetadata{CapturedAt: ts},
+	}, nil
+}
+
 // Images is for getting simultaneous images from different sensors
 // If the underlying source did not specify an Images function, a default is applied.
 // The default returns a list of 1 image from ReadImage, and the current time.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"time"
 
 	"github.com/pkg/errors"
 	pb "go.viam.com/api/component/camera/v1"
@@ -141,6 +142,119 @@ type Camera interface {
 	// Properties returns properties that are intrinsic to the particular
 	// implementation of a camera.
 	Properties(ctx context.Context) (Properties, error)
+
+	Readings(ctx context.Context, req ReadingsRequest) (ReadingsResponse, error)
+}
+
+type ReadingsRequest struct {
+	SensorNames []string
+	Extra       map[string]interface{}
+}
+
+type ReadingsResponse struct {
+	Readings map[string]Reading
+	Metadata ReadingMetadata
+}
+
+type Reading struct {
+	ImageMetadata      ReadingImageMetadata
+	BitmapMetadata     ReadingBitmapMetadata
+	PointCloudMetadata ReadingPointCloudMetadata
+	Data               []byte
+}
+
+var (
+	emptyReadingImageMetadata      = ReadingImageMetadata{}
+	emptyReadingBitmapMetadata     = ReadingBitmapMetadata{}
+	emptyReadingPointCloudMetadata = ReadingPointCloudMetadata{}
+)
+
+func (r Reading) Type() (ReadingType, error) {
+	if r.ImageMetadata.Empty() && r.BitmapMetadata.Empty() && r.PointCloudMetadata.Empty() {
+		return ReadingTypeUnspecified, errors.New("no reading type provided")
+	}
+
+	if !r.ImageMetadata.Empty() && r.BitmapMetadata.Empty() && r.PointCloudMetadata.Empty() {
+		return ReadingTypeImage, nil
+	}
+
+	if !r.BitmapMetadata.Empty() && r.ImageMetadata.Empty() && r.PointCloudMetadata.Empty() {
+		return ReadingTypeBitmap, nil
+	}
+
+	if !r.PointCloudMetadata.Empty() && r.ImageMetadata.Empty() && r.BitmapMetadata.Empty() {
+		return ReadingTypePointCloud, nil
+	}
+
+	return ReadingTypeUnspecified, errors.New("multiple reading types provided")
+}
+
+func (rim ReadingImageMetadata) Empty() bool {
+	return rim == emptyReadingImageMetadata
+}
+
+func (rbm ReadingBitmapMetadata) Empty() bool {
+	return rbm == emptyReadingBitmapMetadata
+
+}
+
+func (rpm ReadingPointCloudMetadata) Empty() bool {
+	return rpm == emptyReadingPointCloudMetadata
+}
+
+type ReadingType int
+
+const (
+	ReadingTypeUnspecified ReadingType = iota
+	ReadingTypeImage
+	ReadingTypeBitmap
+	ReadingTypePointCloud
+)
+
+type ReadingImageType int
+
+const (
+	ReadingImageTypeUnspecified ReadingImageType = iota
+	ReadingImageTypeJpeg
+	ReadingImageTypePng
+)
+
+type ReadingBitmapType int
+
+const (
+	ReadingBitmapTypeUnspecified ReadingBitmapType = iota
+	ReadingBitmapTypeViamRawRgba
+	ReadingBitmapTypeViamRawDepth
+)
+
+type ReadingPointCloudType int
+
+const (
+	ReadingPointCloudTypeUnspecified ReadingPointCloudType = iota
+	ReadingPointCloudTypePCD
+)
+
+type ReadingImageMetadata struct {
+	Type            ReadingImageType
+	PixelDimensions Dimensions
+}
+
+type Dimensions struct {
+	x int
+	y int
+}
+
+type ReadingBitmapMetadata struct {
+	Type            ReadingBitmapType
+	PixelDimensions Dimensions
+}
+
+type ReadingPointCloudMetadata struct {
+	Type ReadingPointCloudType
+}
+
+type ReadingMetadata struct {
+	CapturedAt time.Time
 }
 
 // VideoSource is a camera that has `Stream` embedded to directly integrate with gostream.
@@ -179,6 +293,10 @@ type PointCloudSource interface {
 // A ImagesSource is a source that can return a list of images with timestamp.
 type ImagesSource interface {
 	Images(ctx context.Context) ([]NamedImage, resource.ResponseMetadata, error)
+}
+
+type ReadingsSource interface {
+	Readings(ctx context.Context, req ReadingsRequest) (ReadingsResponse, error)
 }
 
 // NewPropertiesError returns an error specific to a failure in Properties.
