@@ -24,7 +24,6 @@ import (
 
 	"go.viam.com/rdk/components/camera/rtppassthrough"
 	"go.viam.com/rdk/data"
-	"go.viam.com/rdk/gostream"
 	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
@@ -96,81 +95,6 @@ func NewClientFromConn(
 		associatedSubs: map[int][]rtppassthrough.SubscriptionID{},
 		logger:         logger,
 	}, nil
-}
-
-func (c *client) Stream(
-	ctx context.Context,
-	errHandlers ...gostream.ErrorHandler,
-) (gostream.VideoStream, error) {
-	ctx, span := trace.StartSpan(ctx, "camera::client::Stream")
-
-	// RSDK-6340: The resource manager closes remote resources when the underlying
-	// connection goes bad. However, when the connection is re-established, the client
-	// objects these resources represent are not re-initialized/marked "healthy".
-	// `healthyClientCh` helps track these transitions between healthy and unhealthy
-	// states.
-	//
-	// When a new `client.Stream()` is created we will either use the existing
-	// `healthyClientCh` or create a new one.
-	//
-	// The goroutine a `Stream()` method spins off will listen to its version of the
-	// `healthyClientCh` to be notified when the connection has died so it can gracefully
-	// terminate.
-	//
-	// When a connection becomes unhealthy, the resource manager will call `Close` on the
-	// camera client object. Closing the client will:
-	// 1. close its `client.healthyClientCh` channel
-	// 2. wait for existing "stream" goroutines to drain
-	// 3. nil out the `client.healthyClientCh` member variable
-	//
-	// New streams concurrent with closing cannot start until this drain completes. There
-	// will never be stream goroutines from the old "generation" running concurrently
-	// with those from the new "generation".
-	healthyClientCh := c.maybeResetHealthyClientCh()
-
-	mimeTypeFromCtx := gostream.MIMETypeHint(ctx, "")
-	ctxWithMIME := gostream.WithMIMETypeHint(context.Background(), mimeTypeFromCtx)
-	streamCtx, stream, frameCh := gostream.NewMediaStreamForChannel[image.Image](ctxWithMIME)
-
-	c.activeBackgroundWorkers.Add(1)
-
-	goutils.PanicCapturingGo(func() {
-		streamCtx = trace.NewContext(streamCtx, span)
-		defer span.End()
-
-		defer c.activeBackgroundWorkers.Done()
-		defer close(frameCh)
-
-		for {
-			if streamCtx.Err() != nil {
-				return
-			}
-
-			img, err := DecodeImageFromCamera(streamCtx, mimeTypeFromCtx, nil, c)
-			if err != nil {
-				for _, handler := range errHandlers {
-					handler(streamCtx, err)
-				}
-			}
-
-			select {
-			case <-streamCtx.Done():
-				return
-			case <-healthyClientCh:
-				if err := stream.Close(ctxWithMIME); err != nil {
-					c.logger.CWarnw(ctx, "error closing stream", "err", err)
-				}
-				return
-			case frameCh <- gostream.MediaReleasePairWithError[image.Image]{
-				Media:   img,
-				Release: func() {},
-				Err:     err,
-			}:
-			}
-		}
-	})
-
-	return stream, nil
 }
 
 func (c *client) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, ImageMetadata, error) {

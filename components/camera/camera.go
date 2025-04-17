@@ -13,7 +13,6 @@ import (
 	pb "go.viam.com/api/component/camera/v1"
 
 	"go.viam.com/rdk/data"
-	"go.viam.com/rdk/gostream"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
@@ -143,44 +142,6 @@ type Camera interface {
 	Properties(ctx context.Context) (Properties, error)
 }
 
-// VideoSource is a camera that has `Stream` embedded to directly integrate with gostream.
-// Note that generally, when writing camera components from scratch, embedding `Stream` is an anti-pattern.
-type VideoSource interface {
-	Camera
-	Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error)
-}
-
-// ReadImage reads an image from the given source that is immediately available.
-func ReadImage(ctx context.Context, src gostream.VideoSource) (image.Image, func(), error) {
-	return gostream.ReadImage(ctx, src)
-}
-
-// DecodeImageFromCamera retrieves image bytes from a camera resource and serializes it as an image.Image.
-func DecodeImageFromCamera(ctx context.Context, mimeType string, extra map[string]interface{}, cam Camera) (image.Image, error) {
-	resBytes, resMetadata, err := cam.Image(ctx, mimeType, extra)
-	if err != nil {
-		return nil, fmt.Errorf("could not get image bytes from camera: %w", err)
-	}
-	if len(resBytes) == 0 {
-		return nil, errors.New("received empty bytes from camera")
-	}
-	img, err := rimage.DecodeImage(ctx, resBytes, utils.WithLazyMIMEType(resMetadata.MimeType))
-	if err != nil {
-		return nil, fmt.Errorf("could not decode into image.Image: %w", err)
-	}
-	return img, nil
-}
-
-// A PointCloudSource is a source that can generate pointclouds.
-type PointCloudSource interface {
-	NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error)
-}
-
-// A ImagesSource is a source that can return a list of images with timestamp.
-type ImagesSource interface {
-	Images(ctx context.Context) ([]NamedImage, resource.ResponseMetadata, error)
-}
-
 // NewPropertiesError returns an error specific to a failure in Properties.
 func NewPropertiesError(cameraIdentifier string) error {
 	return errors.Errorf("failed to get properties from %s", cameraIdentifier)
@@ -200,4 +161,20 @@ func FromRobot(r robot.Robot, name string) (Camera, error) {
 // NamesFromRobot is a helper for getting all camera names from the given Robot.
 func NamesFromRobot(r robot.Robot) []string {
 	return robot.NamesByAPI(r, API)
+}
+
+// DecodeImageFromCamera retrieves image bytes from a camera resource and serializes it as an image.Image.
+func DecodeImageFromCamera(ctx context.Context, mimeType string, extra map[string]interface{}, cam Camera) (image.Image, error) {
+	resBytes, resMetadata, err := cam.Image(ctx, mimeType, extra)
+	if err != nil {
+		return nil, fmt.Errorf("could not get image bytes from camera: %w", err)
+	}
+	if len(resBytes) == 0 {
+		return nil, errors.New("received empty bytes from camera")
+	}
+	img, err := rimage.DecodeImage(ctx, resBytes, utils.WithLazyMIMEType(resMetadata.MimeType))
+	if err != nil {
+		return nil, fmt.Errorf("could not decode into image.Image: %w", err)
+	}
+	return img, nil
 }
