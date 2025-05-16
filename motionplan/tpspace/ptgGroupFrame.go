@@ -63,6 +63,7 @@ type ptgGroupFrame struct {
 
 // NewPTGFrameFromKinematicOptions will create a new Frame which is also a PTGProvider. It will precompute the default set of
 // trajectories out to a given distance, or a default distance if the given distance is <= 0.
+// NOTE: although this returns a Model, this is a hack -- none of the Model specific methods are implemented usefully.
 func NewPTGFrameFromKinematicOptions(
 	name string,
 	logger logging.Logger,
@@ -149,7 +150,7 @@ func (pf *ptgGroupFrame) Name() string {
 	return pf.name
 }
 
-func (pf *ptgGroupFrame) ModelConfig() *referenceframe.ModelConfig {
+func (pf *ptgGroupFrame) ModelConfig() *referenceframe.ModelConfigJSON {
 	return nil
 }
 func (pf *ptgGroupFrame) ModelPieceFrames([]referenceframe.Input) (map[string]referenceframe.Frame, error) {

@@ -3,6 +3,7 @@ package referenceframe
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
+	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 
 	"go.viam.com/rdk/logging"
@@ -20,8 +22,56 @@ import (
 // A Model represents a frame that can change its name, and can return itself as a ModelConfig struct.
 type Model interface {
 	Frame
-	ModelConfig() *ModelConfig
+	ModelConfig() *ModelConfigJSON
 	ModelPieceFrames([]Input) (map[string]Frame, error)
+}
+
+func KinematicModelFromProtobuf(name string, resp *commonpb.GetKinematicsResponse) (Model, error) {
+	if resp == nil {
+		return nil, errors.New("*commonpb.GetKinematicsResponse can't be nil")
+	}
+	format := resp.GetFormat()
+	data := resp.GetKinematicsData()
+
+	switch format {
+	case commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_SVA:
+		return UnmarshalModelJSON(data, name)
+	case commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_URDF:
+		modelconf, err := UnmarshalModelXML(data, name)
+		if err != nil {
+			return nil, err
+		}
+		return modelconf.ParseConfig(name)
+	case commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_UNSPECIFIED:
+		fallthrough
+	default:
+		if formatName, ok := commonpb.KinematicsFileFormat_name[int32(format)]; ok {
+			return nil, fmt.Errorf("unable to parse file of type %s", formatName)
+		}
+		return nil, fmt.Errorf("unable to parse unknown file type %d", format)
+	}
+}
+
+func KinematicModelToProtobuf(model Model) *commonpb.GetKinematicsResponse {
+	unspecified := commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_UNSPECIFIED
+	if model == nil {
+		return &commonpb.GetKinematicsResponse{Format: unspecified}
+	}
+
+	cfg := model.ModelConfig()
+	if cfg == nil || cfg.OriginalFile == nil {
+		return &commonpb.GetKinematicsResponse{Format: unspecified}
+	}
+	resp := &commonpb.GetKinematicsResponse{KinematicsData: cfg.OriginalFile.Bytes}
+	switch cfg.OriginalFile.Extension {
+	case "json":
+		resp.Format = commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_SVA
+	case "urdf":
+		resp.Format = commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_URDF
+	default:
+		resp.Format = commonpb.KinematicsFileFormat_KINEMATICS_FILE_FORMAT_URDF
+	}
+	return resp
 }
 
 // SimpleModel is a model that serially concatenates a list of Frames.
@@ -29,7 +79,7 @@ type SimpleModel struct {
 	*baseFrame
 	// OrdTransforms is the list of transforms ordered from end effector to base
 	OrdTransforms []Frame
-	modelConfig   *ModelConfig
+	modelConfig   *ModelConfigJSON
 	poseCache     sync.Map
 	lock          sync.RWMutex
 }
@@ -57,7 +107,7 @@ func GenerateRandomConfiguration(m Model, randSeed *rand.Rand) []float64 {
 }
 
 // ModelConfig returns the ModelConfig object used to create this model.
-func (m *SimpleModel) ModelConfig() *ModelConfig {
+func (m *SimpleModel) ModelConfig() *ModelConfigJSON {
 	return m.modelConfig
 }
 
