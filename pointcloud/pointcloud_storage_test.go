@@ -11,6 +11,27 @@ import (
 	"go.viam.com/utils"
 )
 
+// assertDataEqual checks that two Data values are semantically equivalent by
+// comparing all interface method outputs. This is used instead of ShouldResemble
+// because different storage backends may return different concrete types (e.g.
+// *basicData vs *flatData) that hold the same logical values.
+func assertDataEqual(t *testing.T, got, want Data) {
+	t.Helper()
+	test.That(t, got.HasColor(), test.ShouldEqual, want.HasColor())
+	test.That(t, got.HasValue(), test.ShouldEqual, want.HasValue())
+	test.That(t, got.Intensity(), test.ShouldEqual, want.Intensity())
+	if want.HasColor() {
+		gr, gg, gb := got.RGB255()
+		wr, wg, wb := want.RGB255()
+		test.That(t, gr, test.ShouldEqual, wr)
+		test.That(t, gg, test.ShouldEqual, wg)
+		test.That(t, gb, test.ShouldEqual, wb)
+	}
+	if want.HasValue() {
+		test.That(t, got.Value(), test.ShouldEqual, want.Value())
+	}
+}
+
 func testPointCloudStorage(t *testing.T, ms storage) {
 	t.Helper()
 
@@ -30,7 +51,7 @@ func testPointCloudStorage(t *testing.T, ms storage) {
 	test.That(t, ms.Size(), test.ShouldEqual, 1)
 	gotData, found = ms.At(1, 2, 3)
 	test.That(t, found, test.ShouldEqual, true)
-	test.That(t, gotData, test.ShouldEqual, data)
+	assertDataEqual(t, gotData, data)
 
 	// Second Insertion
 	point = r3.Vector{4, 2, 3}
@@ -44,7 +65,7 @@ func testPointCloudStorage(t *testing.T, ms storage) {
 	test.That(t, ms.Size(), test.ShouldEqual, 2)
 	gotData, found = ms.At(4, 2, 3)
 	test.That(t, found, test.ShouldEqual, true)
-	test.That(t, gotData, test.ShouldEqual, data)
+	assertDataEqual(t, gotData, data)
 
 	// Retrieval of non-existent point
 	gotData, found = ms.At(3, 1, 7)
